@@ -35,6 +35,7 @@ from scene.dataset_readers import SARSceneDataset, compute_scene_bounds_from_dat
 from gaussian_model import GaussianModel
 from losses import CombinedLoss
 from training_strategies import DensifyConfig, PruneConfig
+from training import TrainingPipeline
 
 try:
     from cuda_rasterizer import cuda_rasterizer_sar
@@ -889,211 +890,96 @@ class SARGSTrainingGUI:
         prune_config = self.get_prune_config()
 
         max_iterations = self.max_iterations_var.get()
-        log_interval = 1
         save_interval = self.save_interval_var.get()
-        viz_interval = 1
         opacity_reset_interval = self.opacity_reset_interval_var.get()
-        init_opacity = torch.logit(torch.tensor(self.init_opacity_var.get())).item()
+        init_opacity_logit = torch.logit(torch.tensor(self.init_opacity_var.get())).item()
 
-        self.log("开始训练循环...")
-        iteration = start_iteration
-        epoch = 0
+        pipeline = TrainingPipeline(
+            gaussian_model=gaussian_model,
+            optimizer=optimizer,
+            loss_fn=loss_fn,
+            densify_config=densify_config,
+            prune_config=prune_config,
+            scheduler=scheduler,
+            stop_callback=self.stop_event.is_set
+        )
+        pipeline.set_device(device)
+        pipeline.set_init_opacity(init_opacity_logit, opacity_reset_interval)
+        pipeline.iteration = start_iteration
+
         self._train_checkpoint_info = {
             'gaussian_model': gaussian_model,
             'optimizer': optimizer,
-            'iteration': iteration,
+            'iteration': start_iteration,
             'output_dir': output_dir
         }
-        loss_history = []
-        self.log(f"初始不透明度设置: GUI={self.init_opacity_var.get():.4f}, logit={init_opacity:.4f}")
+
+        self.log("开始训练循环...")
+        self.log(f"初始不透明度设置: GUI={self.init_opacity_var.get():.4f}, logit={init_opacity_logit:.4f}")
         self.log(f"不透明度重置间隔: {opacity_reset_interval} 次迭代")
-        last_opacity_reset_epoch = 0
-        epoch_clone_count = 0
-        epoch_split_count = 0
-        epoch_prune_count = 0
-        epoch_l1_losses = []
-        epoch_ssim_losses = []
 
-        precomputed_renderers = {}
-        precomputed_covs = {}
-
-        while iteration < max_iterations:
+        epoch = 0
+        while pipeline.iteration < max_iterations:
             if self.stop_event.is_set():
                 self.log("训练被用户停止，正在保存检查点...")
                 self._emergency_checkpoint_save()
                 self._train_checkpoint_info['stopped'] = True
                 break
 
-            epoch_based_degree = epoch // 5
-            iteration_based_degree = iteration // 200
-            new_sh_degree = min(max(epoch_based_degree, iteration_based_degree), self.sh_degree_var.get())
-            if new_sh_degree != gaussian_model.active_sh_degree:
-                gaussian_model.active_sh_degree = new_sh_degree
-                active_coeffs = (new_sh_degree + 1) ** 2
-                self.log(f"[Epoch {epoch}/Iter {iteration}] SH系数激活: degree={new_sh_degree}, 系数数量={active_coeffs}")
+            self._update_sh_degree_pipeline(pipeline, epoch)
 
-            if iteration % 500 == 0 and iteration > 0:
-                means_data = gaussian_model._means.data
-                mean_dist = torch.sqrt(means_data[:, 0]**2 + means_data[:, 1]**2 + means_data[:, 2]**2)
-                self.log(f"[诊断 迭代{iteration}] 均值到原点距离: mean={mean_dist.mean():.4f}, max={mean_dist.max():.4f}, min={mean_dist.min():.4f}")
-
-                grad_means_check = gaussian_model._means.grad
-                if grad_means_check is not None:
-                    grad_mean_sum = grad_means_check.mean(dim=0)
-                    self.log(f"[诊断 迭代{iteration}] 梯度均值: {grad_mean_sum.cpu().numpy()}")
+            if pipeline.iteration % 500 == 0 and pipeline.iteration > 0:
+                self._log_diagnostic_info(pipeline.model, pipeline.iteration)
 
             epoch += 1
-            epoch_start_time = time.time()
             epoch_indices = np.random.permutation(len(dataset))
-            epoch_losses = []
+            epoch_result = pipeline.train_epoch(dataset, epoch_indices)
 
-            for idx in epoch_indices:
-                if iteration >= max_iterations or self.stop_event.is_set():
-                    break
+            self._log_epoch_stats_pipeline(epoch_result)
 
-                camera = dataset.get_camera(idx)
-                norm_factor = camera.normalization_factor
-                target_image = camera.image.to(device) / norm_factor
-
-                radar_params = camera.radar_params
-                camera_key = (radar_params.incidence_angle, radar_params.track_angle, radar_params.azimuth_angle, radar_params.range_resolution, radar_params.azimuth_resolution)
-
-                if camera_key not in precomputed_renderers:
-                    theta_rad = np.deg2rad(radar_params.incidence_angle)
-                    phi_rad = np.deg2rad(radar_params.azimuth_angle)
-                    sin_beta = np.sin(theta_rad) * np.cos(phi_rad)
-                    beta = np.arcsin(np.clip(sin_beta, -1.0, 1.0))
-                    tan_beta = np.tan(beta)
-                    alpha = np.deg2rad(radar_params.track_angle)
-                    radar_altitude = radar_params.radar_altitude
-
-                    radar_x = radar_altitude * tan_beta * np.sin(alpha)
-                    radar_y = -radar_altitude * tan_beta * np.cos(alpha)
-                    radar_z = radar_altitude
-
-                    from cuda_rasterizer.rasterizer_autograd import SARRasterizer
-                    renderer = SARRasterizer(
-                        radar_x=radar_x,
-                        radar_y=radar_y,
-                        radar_z=radar_z,
-                        track_angle=radar_params.track_angle,
-                        incidence_angle=radar_params.incidence_angle,
-                        azimuth_angle=radar_params.azimuth_angle,
-                        range_resolution=radar_params.range_resolution,
-                        azimuth_resolution=radar_params.azimuth_resolution,
-                        range_samples=128,
-                        azimuth_samples=128
-                    ).to(device)
-                    precomputed_renderers[camera_key] = (renderer, radar_params)
-
-                renderer, radar_params = precomputed_renderers[camera_key]
-
-                if id(gaussian_model._means) not in precomputed_covs:
-                    cov_full = gaussian_model.compute_covariance_full()
-                    precomputed_covs[id(gaussian_model._means)] = cov_full.detach()
-                else:
-                    cov_full = precomputed_covs[id(gaussian_model._means)]
-
-                opacity = gaussian_model.get_opacity()
-                sh_coeffs = gaussian_model.get_active_sh_coeffs()
-                means = gaussian_model._means
-
-                rendered_image = renderer(means, cov_full, opacity.squeeze(-1), sh_coeffs)
-
-                if rendered_image.shape != target_image.shape:
-                    rendered_image = torch.nn.functional.interpolate(
-                        rendered_image.unsqueeze(0).unsqueeze(0),
-                        size=target_image.shape,
-                        mode='bilinear',
-                        align_corners=False
-                    ).squeeze()
-
-                loss, loss_dict = loss_fn(rendered_image, target_image)
-
-                optimizer.zero_grad()
-                loss.backward()
-
-                with torch.no_grad():
-                    grad_means = gaussian_model._means.grad
-                    grad_scales = gaussian_model._scales.grad
-                    grad_opacities = gaussian_model._opacities.grad
-
-                    if grad_means is not None:
-                        grad_means = grad_means.detach()
-                    if grad_scales is not None:
-                        grad_scales = grad_scales.detach()
-                    if grad_opacities is not None:
-                        grad_opacities = grad_opacities.detach()
-
-                    if iteration > prune_config.start_iter and iteration % prune_config.interval == 0 and epoch > last_opacity_reset_epoch + 3:
-                        num_clones, num_splits, num_prunes, _ = gaussian_model.densify_and_prune(
-                            grad_means=grad_means,
-                            grad_scales=grad_scales,
-                            grad_opacities=grad_opacities,
-                            grad_threshold=densify_config.grad_threshold,
-                            size_threshold=densify_config.clone_threshold,
-                            large_scale_threshold=prune_config.scale_threshold,
-                            opacity_threshold=prune_config.opacity_threshold
-                        )
-                        epoch_clone_count += num_clones
-                        epoch_split_count += num_splits
-                        epoch_prune_count += num_prunes
-
-                        del grad_means, grad_scales, grad_opacities
-                        torch.cuda.empty_cache()
-
-                        if num_clones > 0 or num_splits > 0 or num_prunes > 0:
-                            precomputed_covs.clear()
-                            optimizer = optim.Adam([
-                                {'params': [gaussian_model._means], 'lr': self.lr_position_var.get()},
-                                {'params': [gaussian_model._scales], 'lr': self.lr_scale_var.get()},
-                                {'params': [gaussian_model._rotations], 'lr': self.lr_rotation_var.get()},
-                                {'params': [gaussian_model._opacities], 'lr': self.lr_opacity_var.get()},
-                                {'params': [gaussian_model._sh_coeffs], 'lr': self.lr_sh_var.get()},
-                            ])
-
-                    if iteration > densify_config.interval * 20 and iteration % opacity_reset_interval == 0:
-                        gaussian_model._opacities.data.fill_(init_opacity)
-                        last_opacity_reset_epoch = epoch
-                        actual_opacity = torch.sigmoid(gaussian_model._opacities).mean().item()
-                        self.log(f"[迭代 {iteration}] 不透明度重置为: logit={init_opacity}, 实际值={actual_opacity:.4f}")
-
-                optimizer.step()
-                scheduler.step()
-
-                epoch_losses.append(loss_dict['total'])
-                epoch_l1_losses.append(loss_dict['l1'])
-                epoch_ssim_losses.append(loss_dict['dssim'])
-                loss_history.append(loss_dict['total'])
-                iteration += 1
-                self._train_checkpoint_info['iteration'] = iteration
-
-            epoch_time = time.time() - epoch_start_time
-            avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
-            avg_l1 = np.mean(epoch_l1_losses) if epoch_l1_losses else 0.0
-            avg_ssim = np.mean(epoch_ssim_losses) if epoch_ssim_losses else 0.0
-            total_prune = epoch_prune_count
-            self.log(f"Epoch {epoch:04d} | Avg Loss: {avg_loss:.6f} (L1: {avg_l1:.6f}, DSSIM: {avg_ssim:.6f}) | "
-                     f"Gaussians: {gaussian_model.num_gaussians} | "
-                     f"Clone: {epoch_clone_count} | Split: {epoch_split_count} | Prune: {total_prune} | Time: {epoch_time:.1f}s")
-
-            epoch_clone_count = 0
-            epoch_split_count = 0
-            epoch_prune_count = 0
-            epoch_l1_losses = []
-            epoch_ssim_losses = []
-
-            if epoch % viz_interval == 0:
+            if epoch % 1 == 0:
                 self._save_visualization(output_dir, render_output_dir, viz_output_dir, epoch, gaussian_model, dataset, viz_indices)
 
-            if iteration % save_interval == 0 and iteration > 0:
-                checkpoint_path = output_dir / f'checkpoint_iter_{iteration}.pth'
-                gaussian_model.save_checkpoint(str(checkpoint_path), iteration=iteration, optimizer_state=optimizer.state_dict())
+            if epoch % (save_interval // len(dataset) + 1) == 0 and pipeline.iteration > 0:
+                checkpoint_path = output_dir / f'checkpoint_iter_{pipeline.iteration}.pth'
+                gaussian_model.save_checkpoint(str(checkpoint_path), iteration=pipeline.iteration, optimizer_state=optimizer.state_dict())
                 self.log(f"已保存检查点: {checkpoint_path}")
 
         final_path = output_dir / 'final_model.pth'
-        gaussian_model.save_checkpoint(str(final_path), iteration=iteration, optimizer_state=optimizer.state_dict())
+        gaussian_model.save_checkpoint(str(final_path), iteration=pipeline.iteration, optimizer_state=optimizer.state_dict())
         self.log(f"训练完成! 模型已保存: {final_path}")
+
+    def _update_sh_degree_pipeline(self, pipeline, epoch):
+        """更新SH degree"""
+        epoch_based_degree = epoch // 5
+        iteration_based_degree = pipeline.iteration // 200
+        new_degree = min(max(epoch_based_degree, iteration_based_degree), self.sh_degree_var.get())
+
+        if new_degree != pipeline.get_sh_degree():
+            pipeline.set_sh_degree(new_degree)
+            active_coeffs = (new_degree + 1) ** 2
+            self.log(f"[Epoch {epoch}/Iter {pipeline.iteration}] SH系数激活: degree={new_degree}, 系数数量={active_coeffs}")
+
+    def _log_diagnostic_info(self, gaussian_model, iteration):
+        """记录诊断信息"""
+        means_data = gaussian_model._means.data
+        mean_dist = torch.sqrt(means_data[:, 0]**2 + means_data[:, 1]**2 + means_data[:, 2]**2)
+        self.log(f"[诊断 迭代{iteration}] 均值到原点距离: mean={mean_dist.mean():.4f}, max={mean_dist.max():.4f}, min={mean_dist.min():.4f}")
+
+        grad_means_check = gaussian_model._means.grad
+        if grad_means_check is not None:
+            grad_mean_sum = grad_means_check.mean(dim=0)
+            self.log(f"[诊断 迭代{iteration}] 梯度均值: {grad_mean_sum.cpu().numpy()}")
+
+    def _log_epoch_stats_pipeline(self, epoch_result):
+        """记录epoch统计信息（使用TrainingPipeline）"""
+        self.log(f"Epoch {epoch_result.epoch:04d} | "
+                 f"Avg Loss: {epoch_result.avg_loss:.6f} (L1: {epoch_result.avg_l1:.6f}, DSSIM: {epoch_result.avg_ssim:.6f}) | "
+                 f"Gaussians: {epoch_result.num_gaussians} | "
+                 f"Clone: {epoch_result.clone_count} | "
+                 f"Split: {epoch_result.split_count} | "
+                 f"Prune: {epoch_result.prune_count} | "
+                 f"Time: {epoch_result.time_seconds:.1f}s")
 
     def _get_visualization_indices(self, dataset, num_views):
         num_cameras = len(dataset)

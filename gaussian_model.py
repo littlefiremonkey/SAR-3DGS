@@ -303,16 +303,16 @@ class GaussianModel(nn.Module):
                 S[i] = torch.diag(scales[i])
 
             Sigma = R @ S @ S.transpose(-1, -2) @ R.transpose(-1, -2)
-            self._cov_cache = Sigma
+            self._cov_cache = Sigma.detach().clone()
             self._cov_cache_size = current_size
             self._cov_cache_scales_id = scales_id
             self._cov_cache_rotations_id = rotations_id
-            return Sigma
+            return self._cov_cache.clone()
 
         if (self._cov_cache_scales_id == scales_id and
             self._cov_cache_rotations_id == rotations_id and
             self._cov_cache_size == current_size):
-            return self._cov_cache
+            return self._cov_cache.detach().clone()
 
         scales = torch.exp(self._scales)
         R = Quaternion.to_rotation_matrix(self._rotations)
@@ -321,11 +321,11 @@ class GaussianModel(nn.Module):
             S[i] = torch.diag(scales[i])
 
         Sigma = R @ S @ S.transpose(-1, -2) @ R.transpose(-1, -2)
-        self._cov_cache = Sigma
+        self._cov_cache = Sigma.detach().clone()
         self._cov_cache_size = current_size
         self._cov_cache_scales_id = scales_id
         self._cov_cache_rotations_id = rotations_id
-        return Sigma
+        return self._cov_cache.clone()
 
     def get_opacity(self) -> torch.Tensor:
         """获取sigmoid激活后的不透明度"""
