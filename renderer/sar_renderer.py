@@ -40,6 +40,7 @@ import torch.nn as nn
 import numpy as np
 from typing import Optional, Tuple, Dict
 from dataclasses import dataclass
+from .spherical_harmonics import SphericalHarmonics
 
 
 @dataclass
@@ -531,6 +532,45 @@ class UnifiedSARRenderer(nn.Module):
 
         self.H, self.W = params.image_size
 
+        from .spherical_harmonics import SHRenderer
+        self.sh_renderer = SHRenderer(sh_degree=3)
+
+        self._cached_beta = None
+        self._cached_alpha = None
+        self._cached_sh_basis = None
+        self._cached_active_degree = None
+
+    def _update_sh_basis_cache(self, beta_rad: float, alpha_rad: float, active_degree: int):
+        """预计算并缓存SH基函数
+
+        当视角参数(beta, alpha)或SH阶数(active_degree)变化时，重新计算并缓存SH基函数。
+
+        Args:
+            beta_rad: 有效入射角β (弧度)
+            alpha_rad: 航迹角α (弧度)
+            active_degree: 当前激活的SH阶数
+        """
+        view_changed = (self._cached_beta != beta_rad or self._cached_alpha != alpha_rad)
+        degree_changed = (self._cached_active_degree != active_degree)
+
+        if view_changed:
+            view_dir = torch.tensor([
+                np.sin(beta_rad) * np.cos(alpha_rad),
+                np.sin(beta_rad) * np.sin(alpha_rad),
+                -np.cos(beta_rad)
+            ], dtype=torch.float32)
+
+            theta, phi = self.sh_renderer._cartesian_to_spherical(view_dir.unsqueeze(0))
+            self._cached_sh_basis = SphericalHarmonics.compute_sh_basis(
+                theta, phi, max_degree=3
+            ).squeeze(0)
+
+            self._cached_beta = beta_rad
+            self._cached_alpha = alpha_rad
+            self._cached_active_degree = active_degree
+        elif degree_changed:
+            self._cached_active_degree = active_degree
+
     def forward(
         self,
         gaussian_means: torch.Tensor,
@@ -538,7 +578,8 @@ class UnifiedSARRenderer(nn.Module):
         sh_coeffs: torch.Tensor,
         transmittance: torch.Tensor,
         radar_position: Optional[torch.Tensor] = None,
-        track_angle: float = 0.0
+        track_angle: float = 0.0,
+        active_sh_degree: int = 3
     ) -> Tuple[torch.Tensor, Dict]:
         """
         统一前向渲染
@@ -550,6 +591,7 @@ class UnifiedSARRenderer(nn.Module):
             transmittance: [N] 透射率 σ (等价于opacity, 0~1)
             radar_position: [3] 雷达位置
             track_angle: 航迹角α (度)
+            active_sh_degree: 当前激活的SH阶数
 
         Returns:
             rendered_image: [H, W] 渲染图像
@@ -578,15 +620,9 @@ class UnifiedSARRenderer(nn.Module):
         beta_rad = self.params.beta_rad
         alpha_rad = np.deg2rad(track_angle) if track_angle != 0.0 else 0.0
 
-        view_dirs = torch.tensor([
-            np.sin(beta_rad) * np.cos(alpha_rad),
-            np.sin(beta_rad) * np.sin(alpha_rad),
-            -np.cos(beta_rad)
-        ], device=gaussian_means.device, dtype=torch.float32)
-        view_dirs = view_dirs / (torch.norm(view_dirs) + 1e-8)
-        view_dirs = view_dirs.unsqueeze(0).expand(gaussian_means.shape[0], -1)
-
-        scattering = self._compute_scattering(view_dirs, sh_coeffs)
+        scattering = self._compute_scattering_cached(
+            beta_rad, alpha_rad, sh_coeffs, active_sh_degree
+        )
 
         rendered_image = self._alpha_blend_render(
             ipp_coords,
@@ -606,26 +642,33 @@ class UnifiedSARRenderer(nn.Module):
 
         return rendered_image, aux_data
 
-    def _compute_scattering(
+    def _compute_scattering_cached(
         self,
-        view_dirs: torch.Tensor,
-        sh_coeffs: torch.Tensor
+        beta_rad: float,
+        alpha_rad: float,
+        sh_coeffs: torch.Tensor,
+        active_degree: int
     ) -> torch.Tensor:
-        """
-        计算球谐散射强度
-
-        Si(β, α) = Σ(l=0..3) Σ(m=-l..l) c_lm × Y_lm(θ, φ)
+        """使用缓存的SH基函数计算散射强度
 
         Args:
-            view_dirs: [N, 3] 视线方向
+            beta_rad: 有效入射角β (弧度)
+            alpha_rad: 航迹角α (弧度)
             sh_coeffs: [N, K] 球谐系数
+            active_degree: 当前激活的SH阶数
 
         Returns:
             scattering: [N] 散射强度
         """
-        from .spherical_harmonics import SHRenderer
-        sh_renderer = SHRenderer(sh_degree=3)
-        scattering = sh_renderer(view_dirs, sh_coeffs)
+        self._update_sh_basis_cache(beta_rad, alpha_rad, active_degree)
+
+        active_K = (active_degree + 1) ** 2
+        sh_basis_active = self._cached_sh_basis[:active_K]
+
+        N = sh_coeffs.shape[0]
+        sh_basis = sh_basis_active.unsqueeze(0).expand(N, -1)
+
+        scattering = torch.sum(sh_coeffs * sh_basis, dim=-1)
         return scattering
 
     def _alpha_blend_render(

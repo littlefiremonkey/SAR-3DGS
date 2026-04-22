@@ -132,6 +132,9 @@ class CombinedLoss(nn.Module):
     L1 + D-SSIM组合，比例0.9:0.1，支持加权L1
     """
 
+    _cached_kernel = None
+    _cached_kernel_size = None
+
     def __init__(
         self,
         l1_weight: float = 0.9,
@@ -147,6 +150,13 @@ class CombinedLoss(nn.Module):
         self.use_weighted_l1 = use_weighted_l1
         self.l1_weight_mode = l1_weight_mode
 
+    def _get_kernel(self, device: torch.device) -> torch.Tensor:
+        if CombinedLoss._cached_kernel is None or CombinedLoss._cached_kernel_size != self.window_size:
+            CombinedLoss._cached_kernel = gaussian_kernel(self.window_size, 1.5)
+            CombinedLoss._cached_kernel_size = self.window_size
+        kernel = CombinedLoss._cached_kernel.to(device)
+        return kernel.view(1, 1, self.window_size, self.window_size)
+
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
         """计算组合损失
 
@@ -161,7 +171,37 @@ class CombinedLoss(nn.Module):
             loss_l1 = weighted_l1_loss(pred, target, mode=self.l1_weight_mode)
         else:
             loss_l1 = l1_loss(pred, target)
-        loss_ssim = dssim_loss(pred, target, self.window_size)
+
+        if pred.dim() == 2:
+            pred = pred.unsqueeze(0).unsqueeze(0)
+            target = target.unsqueeze(0).unsqueeze(0)
+        elif pred.dim() == 3:
+            pred = pred.unsqueeze(1)
+            target = target.unsqueeze(1)
+        elif pred.dim() != 4:
+            raise ValueError(f"输入维度错误: pred.dim()={pred.dim()}")
+
+        device = pred.device
+        kernel = self._get_kernel(device)
+        kernel = kernel.repeat(pred.size(1), 1, 1, 1)
+
+        C1 = 0.01 ** 2
+        C2 = 0.03 ** 2
+
+        mu_pred = F.conv2d(pred, kernel, padding=self.window_size // 2, groups=pred.size(1))
+        mu_target = F.conv2d(target, kernel, padding=self.window_size // 2, groups=pred.size(1))
+
+        mu_pred_sq = mu_pred ** 2
+        mu_target_sq = mu_target ** 2
+        mu_pred_target = mu_pred * mu_target
+
+        sigma_pred_sq = F.conv2d(pred ** 2, kernel, padding=self.window_size // 2, groups=pred.size(1)) - mu_pred_sq
+        sigma_target_sq = F.conv2d(target ** 2, kernel, padding=self.window_size // 2, groups=pred.size(1)) - mu_target_sq
+        sigma_pred_target = F.conv2d(pred * target, kernel, padding=self.window_size // 2, groups=pred.size(1)) - mu_pred_target
+
+        ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
+                   ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
+        loss_ssim = 1.0 - ssim_map.mean()
 
         total_loss = self.l1_weight * loss_l1 + self.ssim_weight * loss_ssim
 

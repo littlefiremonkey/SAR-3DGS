@@ -75,6 +75,9 @@ class GaussianModel(nn.Module):
         self._opacities = None
         self._sh_coeffs = None
 
+        self._cov_cache = None
+        self._cov_cache_size = None
+
     @property
     def active_sh_degree(self) -> int:
         return self._active_sh_degree
@@ -280,11 +283,37 @@ class GaussianModel(nn.Module):
         return cov_6
 
     def compute_covariance_full(self) -> torch.Tensor:
-        """计算完整的协方差矩阵
+        """计算完整的协方差矩阵（带缓存）
 
         Returns:
             torch.Tensor: [N, 3, 3] 协方差矩阵
         """
+        current_size = self._means.shape[0]
+        scales_id = id(self._scales)
+        rotations_id = id(self._rotations)
+
+        if (self._cov_cache is None or
+            self._cov_cache_size != current_size or
+            self._scales is None or self._rotations is None):
+
+            scales = torch.exp(self._scales)
+            R = Quaternion.to_rotation_matrix(self._rotations)
+            S = torch.zeros_like(R)
+            for i in range(scales.shape[0]):
+                S[i] = torch.diag(scales[i])
+
+            Sigma = R @ S @ S.transpose(-1, -2) @ R.transpose(-1, -2)
+            self._cov_cache = Sigma
+            self._cov_cache_size = current_size
+            self._cov_cache_scales_id = scales_id
+            self._cov_cache_rotations_id = rotations_id
+            return Sigma
+
+        if (self._cov_cache_scales_id == scales_id and
+            self._cov_cache_rotations_id == rotations_id and
+            self._cov_cache_size == current_size):
+            return self._cov_cache
+
         scales = torch.exp(self._scales)
         R = Quaternion.to_rotation_matrix(self._rotations)
         S = torch.zeros_like(R)
@@ -292,6 +321,10 @@ class GaussianModel(nn.Module):
             S[i] = torch.diag(scales[i])
 
         Sigma = R @ S @ S.transpose(-1, -2) @ R.transpose(-1, -2)
+        self._cov_cache = Sigma
+        self._cov_cache_size = current_size
+        self._cov_cache_scales_id = scales_id
+        self._cov_cache_rotations_id = rotations_id
         return Sigma
 
     def get_opacity(self) -> torch.Tensor:

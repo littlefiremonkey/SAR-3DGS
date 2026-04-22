@@ -316,21 +316,6 @@ class SARGSTrainingGUI:
         size_threshold_entry.grid(row=3, column=1, sticky='w', padx=5)
         ToolTip(size_threshold_entry, "超过此尺寸的高斯将被剪枝")
 
-        self.scatter_prune_enabled_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(prune_frame, text="启用散射剪枝", variable=self.scatter_prune_enabled_var).grid(row=4, column=0, sticky='w', columnspan=2)
-
-        ttk.Label(prune_frame, text="散射剪枝阈值:").grid(row=5, column=0, sticky='w', pady=2)
-        self.scatter_threshold_var = tk.DoubleVar(value=0.2)
-        scatter_threshold_entry = ttk.Entry(prune_frame, textvariable=self.scatter_threshold_var, width=15)
-        scatter_threshold_entry.grid(row=5, column=1, sticky='w', padx=5)
-        ToolTip(scatter_threshold_entry, "高斯投影到所有视角的像素值均小于真实图像*阈值时剪枝")
-
-        ttk.Label(prune_frame, text="散射剪枝间隔:").grid(row=5, column=2, sticky='w', pady=2, padx=(20, 0))
-        self.scatter_interval_var = tk.IntVar(value=30)
-        scatter_interval_entry = ttk.Entry(prune_frame, textvariable=self.scatter_interval_var, width=15)
-        scatter_interval_entry.grid(row=5, column=3, sticky='w', padx=5)
-        ToolTip(scatter_interval_entry, "执行散射剪枝的迭代间隔")
-
     def _create_visualization_tab(self):
         frame = ttk.Frame(self.visualization_tab, padding="10")
         frame.pack(fill=tk.BOTH, expand=True)
@@ -926,30 +911,11 @@ class SARGSTrainingGUI:
         epoch_clone_count = 0
         epoch_split_count = 0
         epoch_prune_count = 0
-        epoch_scatter_prune_count = 0
         epoch_l1_losses = []
         epoch_ssim_losses = []
-        last_scatter_prune_iter = -self.scatter_interval_var.get()
 
+        precomputed_renderers = {}
         precomputed_covs = {}
-
-        if self.scatter_prune_enabled_var.get():
-            num_scatter_init = self._scatter_prune(gaussian_model, dataset, device, self.scatter_threshold_var.get(), iteration, show_progress=True)
-            self.log(f"初始化散射剪枝完成，移除 {num_scatter_init} 个高斯，剩余 {gaussian_model.num_gaussians} 个高斯")
-            epoch_scatter_prune_count += num_scatter_init
-            last_scatter_prune_iter = iteration
-
-            if num_scatter_init > 0:
-                precomputed_covs.clear()
-                optimizer = optim.Adam([
-                    {'params': [gaussian_model._means], 'lr': self.lr_position_var.get()},
-                    {'params': [gaussian_model._scales], 'lr': self.lr_scale_var.get()},
-                    {'params': [gaussian_model._rotations], 'lr': self.lr_rotation_var.get()},
-                    {'params': [gaussian_model._opacities], 'lr': self.lr_opacity_var.get()},
-                    {'params': [gaussian_model._sh_coeffs], 'lr': self.lr_sh_var.get()},
-                ])
-        else:
-            self.log("散射剪枝已禁用")
 
         while iteration < max_iterations:
             if self.stop_event.is_set():
@@ -958,8 +924,8 @@ class SARGSTrainingGUI:
                 self._train_checkpoint_info['stopped'] = True
                 break
 
-            epoch_based_degree = epoch // 10
-            iteration_based_degree = iteration // 300
+            epoch_based_degree = epoch // 5
+            iteration_based_degree = iteration // 200
             new_sh_degree = min(max(epoch_based_degree, iteration_based_degree), self.sh_degree_var.get())
             if new_sh_degree != gaussian_model.active_sh_degree:
                 gaussian_model.active_sh_degree = new_sh_degree
@@ -980,9 +946,6 @@ class SARGSTrainingGUI:
             epoch_start_time = time.time()
             epoch_indices = np.random.permutation(len(dataset))
             epoch_losses = []
-
-            precomputed_renderers = {}
-            precomputed_covs = {}
 
             for idx in epoch_indices:
                 if iteration >= max_iterations or self.stop_event.is_set():
@@ -1089,21 +1052,6 @@ class SARGSTrainingGUI:
                                 {'params': [gaussian_model._sh_coeffs], 'lr': self.lr_sh_var.get()},
                             ])
 
-                    if self.scatter_prune_enabled_var.get() and iteration - last_scatter_prune_iter >= self.scatter_interval_var.get():
-                        num_scatter = self._scatter_prune(gaussian_model, dataset, device, self.scatter_threshold_var.get(), iteration)
-                        epoch_scatter_prune_count += num_scatter
-                        last_scatter_prune_iter = iteration
-
-                        if num_scatter > 0:
-                            precomputed_covs.clear()
-                            optimizer = optim.Adam([
-                                {'params': [gaussian_model._means], 'lr': self.lr_position_var.get()},
-                                {'params': [gaussian_model._scales], 'lr': self.lr_scale_var.get()},
-                                {'params': [gaussian_model._rotations], 'lr': self.lr_rotation_var.get()},
-                                {'params': [gaussian_model._opacities], 'lr': self.lr_opacity_var.get()},
-                                {'params': [gaussian_model._sh_coeffs], 'lr': self.lr_sh_var.get()},
-                            ])
-
                     if iteration > densify_config.interval * 20 and iteration % opacity_reset_interval == 0:
                         gaussian_model._opacities.data.fill_(init_opacity)
                         last_opacity_reset_epoch = epoch
@@ -1124,7 +1072,7 @@ class SARGSTrainingGUI:
             avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
             avg_l1 = np.mean(epoch_l1_losses) if epoch_l1_losses else 0.0
             avg_ssim = np.mean(epoch_ssim_losses) if epoch_ssim_losses else 0.0
-            total_prune = epoch_prune_count + epoch_scatter_prune_count
+            total_prune = epoch_prune_count
             self.log(f"Epoch {epoch:04d} | Avg Loss: {avg_loss:.6f} (L1: {avg_l1:.6f}, DSSIM: {avg_ssim:.6f}) | "
                      f"Gaussians: {gaussian_model.num_gaussians} | "
                      f"Clone: {epoch_clone_count} | Split: {epoch_split_count} | Prune: {total_prune} | Time: {epoch_time:.1f}s")
@@ -1132,7 +1080,6 @@ class SARGSTrainingGUI:
             epoch_clone_count = 0
             epoch_split_count = 0
             epoch_prune_count = 0
-            epoch_scatter_prune_count = 0
             epoch_l1_losses = []
             epoch_ssim_losses = []
 
@@ -1154,101 +1101,6 @@ class SARGSTrainingGUI:
             return list(range(num_cameras))
         step = num_cameras / num_views
         return [int(i * step) for i in range(num_views)]
-
-    def _scatter_prune(self, gaussian_model, dataset, device, threshold, iteration, show_progress=False):
-        return self._scatter_prune_python(gaussian_model, dataset, device, threshold, iteration, show_progress=show_progress)
-
-    def _scatter_prune_python(self, gaussian_model, dataset, device, threshold, iteration, show_progress=False):
-        means = gaussian_model._means.detach()
-        opacities = torch.sigmoid(gaussian_model._opacities.detach())
-        num_gaussians = len(means)
-
-        if num_gaussians == 0:
-            return 0
-
-        has_significant = torch.zeros(num_gaussians, dtype=torch.bool, device=device)
-        total_views = len(dataset)
-
-        valid_mask = opacities.squeeze(-1) > 0.01
-        valid_indices = valid_mask.nonzero(as_tuple=True)[0]
-
-        if len(valid_indices) == 0:
-            return 0
-
-        valid_means = means[valid_indices]
-
-        for idx in range(total_views):
-            camera = dataset.get_camera(idx)
-            target_image = camera.image.to(device)
-
-            rendered_image, _ = self._render_view_for_saving(gaussian_model, camera, device)
-            rendered_image = rendered_image.detach()
-
-            if rendered_image.shape != target_image.shape:
-                rendered_image = torch.nn.functional.interpolate(
-                    rendered_image.unsqueeze(0).unsqueeze(0),
-                    size=target_image.shape,
-                    mode='bilinear',
-                    align_corners=False
-                ).squeeze()
-
-            target_max = target_image.max()
-            threshold_value = target_max * threshold
-
-            radar_params = camera.radar_params
-            theta_rad = np.deg2rad(radar_params.incidence_angle)
-            phi_rad = np.deg2rad(radar_params.azimuth_angle)
-            alpha = np.deg2rad(radar_params.track_angle)
-
-            sin_beta = np.sin(theta_rad) * np.cos(phi_rad)
-            beta = np.arcsin(np.clip(sin_beta, -1.0, 1.0))
-            tan_beta = np.tan(beta)
-            radar_altitude = radar_params.radar_altitude
-
-            radar_x = radar_altitude * tan_beta * np.sin(alpha)
-            radar_y = -radar_altitude * tan_beta * np.cos(alpha)
-            radar_z = radar_altitude
-
-            Rc = radar_altitude / np.cos(beta)
-
-            cos_a, sin_a = np.cos(alpha), np.sin(alpha)
-            cos_b, sin_b = np.cos(beta), np.sin(beta)
-
-            dx_all = valid_means[:, 0] - radar_x
-            dy_all = valid_means[:, 1] - radar_y
-            dz_all = valid_means[:, 2] - radar_z
-
-            xr_all = cos_a * dx_all + sin_a * dy_all
-            yr_all = cos_b * sin_a * dx_all - cos_b * cos_a * dy_all - sin_b * dz_all
-            zr_all = -sin_b * sin_a * dx_all + sin_b * cos_a * dy_all - cos_b * dz_all
-
-            Rmin_all = torch.sqrt(yr_all**2 + zr_all**2)
-            r_coords = Rmin_all / radar_params.range_resolution + rendered_image.shape[0] / 2 - Rc / radar_params.range_resolution
-            c_coords = xr_all / radar_params.azimuth_resolution + rendered_image.shape[1] / 2
-
-            r_coords = torch.clamp(r_coords.long(), 0, rendered_image.shape[0] - 1)
-            c_coords = torch.clamp(c_coords.long(), 0, rendered_image.shape[1] - 1)
-
-            pixel_values = target_image[r_coords, c_coords]
-            significant_gauss_indices = valid_indices[pixel_values > threshold_value]
-            has_significant[significant_gauss_indices] = True
-
-            if show_progress:
-                progress = (idx + 1) / total_views * 100
-                self.log(f"散射剪枝进度: {idx + 1}/{total_views} ({progress:.1f}%)")
-
-        prune_mask = ~has_significant
-        num_pruned = prune_mask.sum().item()
-
-        if num_pruned > 0:
-            keep_mask = ~prune_mask
-            gaussian_model._means = torch.nn.Parameter(gaussian_model._means.data[keep_mask].clone())
-            gaussian_model._scales = torch.nn.Parameter(gaussian_model._scales.data[keep_mask].clone())
-            gaussian_model._rotations = torch.nn.Parameter(gaussian_model._rotations.data[keep_mask].clone())
-            gaussian_model._opacities = torch.nn.Parameter(gaussian_model._opacities.data[keep_mask].clone())
-            gaussian_model._sh_coeffs = torch.nn.Parameter(gaussian_model._sh_coeffs.data[keep_mask].clone())
-
-        return num_pruned
 
     def _render_view_for_saving(self, gaussian_model, camera, device):
         means = gaussian_model._means

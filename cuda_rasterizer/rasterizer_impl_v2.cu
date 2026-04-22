@@ -232,11 +232,97 @@ __device__ float compute_gaussian_density_2d(
     return fmaxf(result, 0.0f);
 }
 
+__device__ float compute_sh_scattering_with_basis(const float* sh_basis, const float* sh_coeffs) {
+    float scattering = sh_coeffs[0] * sh_basis[0];
+    #pragma unroll
+    for (int i = 1; i < SH_COEFFS_SIZE; i++) {
+        scattering = fmaf(sh_coeffs[i], sh_basis[i], scattering);
+    }
+    return scattering;
+}
+
+__device__ void compute_sh_basis_device(float theta, float phi, float* sh_basis) {
+    float cos_theta = __cosf(theta);
+    float sin_theta = __sinf(theta);
+    float cos_phi = __cosf(phi);
+    float sin_phi = __sinf(phi);
+
+    float sin_theta_sq = sin_theta * sin_theta;
+    float cos_theta_sq = cos_theta * cos_theta;
+    float sin_cos_theta = sin_theta * cos_theta;
+    float sin_cos_phi = sin_theta * cos_phi;
+
+    sh_basis[0] = SH_C0;
+
+    sh_basis[1] = SH_C1 * sin_theta * sin_phi;
+    sh_basis[2] = SH_C1 * sin_theta * cos_phi;
+    sh_basis[3] = SH_C1 * cos_theta;
+
+    sh_basis[4] = SH_C2 * sin_cos_phi * sin_phi;
+    sh_basis[5] = SH_C2 * sin_cos_theta * cos_phi;
+    sh_basis[6] = SH_C20 * (3.0f * cos_theta_sq - 1.0f);
+    sh_basis[7] = -SH_C2 * sin_cos_theta * sin_phi;
+    sh_basis[8] = -SH_C2 * sin_cos_theta * cos_phi;
+
+    float three_cos_theta_sq_minus_one = 3.0f * cos_theta_sq - 1.0f;
+    float five_cos_theta_cu_minus_three = (5.0f * cos_theta_sq - 3.0f) * cos_theta;
+
+    sh_basis[9] = SH_C22 * sin_theta * sin_phi * three_cos_theta_sq_minus_one;
+    sh_basis[10] = SH_C22 * sin_cos_phi * three_cos_theta_sq_minus_one;
+    sh_basis[11] = SH_C22 * cos_theta * three_cos_theta_sq_minus_one;
+    sh_basis[12] = SH_C3 * sin_theta * sin_phi * five_cos_theta_cu_minus_three;
+    sh_basis[13] = SH_C3 * sin_cos_phi * five_cos_theta_cu_minus_three;
+
+    float fifteen_cos_theta_sq_sq_minus_six_cos_theta_sq_minus_one =
+        (15.0f * cos_theta_sq - 6.0f) * cos_theta_sq - 1.0f;
+    sh_basis[14] = SH_C30 * fifteen_cos_theta_sq_sq_minus_six_cos_theta_sq_minus_one;
+    sh_basis[15] = -SH_C3 * sin_theta * sin_phi * five_cos_theta_cu_minus_three;
+}
+
+__host__ void compute_sh_basis_host(float theta, float phi, float* sh_basis) {
+    float cos_theta = cosf(theta);
+    float sin_theta = sinf(theta);
+    float cos_phi = cosf(phi);
+    float sin_phi = sinf(phi);
+
+    float sin_theta_sq = sin_theta * sin_theta;
+    float cos_theta_sq = cos_theta * cos_theta;
+    float sin_cos_theta = sin_theta * cos_theta;
+    float sin_cos_phi = sin_theta * cos_phi;
+
+    sh_basis[0] = SH_C0;
+
+    sh_basis[1] = SH_C1 * sin_theta * sin_phi;
+    sh_basis[2] = SH_C1 * sin_theta * cos_phi;
+    sh_basis[3] = SH_C1 * cos_theta;
+
+    sh_basis[4] = SH_C2 * sin_cos_phi * sin_phi;
+    sh_basis[5] = SH_C2 * sin_cos_theta * cos_phi;
+    sh_basis[6] = SH_C20 * (3.0f * cos_theta_sq - 1.0f);
+    sh_basis[7] = -SH_C2 * sin_cos_theta * sin_phi;
+    sh_basis[8] = -SH_C2 * sin_cos_theta * cos_phi;
+
+    float three_cos_theta_sq_minus_one = 3.0f * cos_theta_sq - 1.0f;
+    float five_cos_theta_cu_minus_three = (5.0f * cos_theta_sq - 3.0f) * cos_theta;
+
+    sh_basis[9] = SH_C22 * sin_theta * sin_phi * three_cos_theta_sq_minus_one;
+    sh_basis[10] = SH_C22 * sin_cos_phi * three_cos_theta_sq_minus_one;
+    sh_basis[11] = SH_C22 * cos_theta * three_cos_theta_sq_minus_one;
+    sh_basis[12] = SH_C3 * sin_theta * sin_phi * five_cos_theta_cu_minus_three;
+    sh_basis[13] = SH_C3 * sin_cos_phi * five_cos_theta_cu_minus_three;
+
+    float fifteen_cos_theta_sq_sq_minus_six_cos_theta_sq_minus_one =
+        (15.0f * cos_theta_sq - 6.0f) * cos_theta_sq - 1.0f;
+    sh_basis[14] = SH_C30 * fifteen_cos_theta_sq_sq_minus_six_cos_theta_sq_minus_one;
+    sh_basis[15] = -SH_C3 * sin_theta * sin_phi * five_cos_theta_cu_minus_three;
+}
+
 __global__ void preprocess_kernel(
     const float* __restrict__ means_world,
     const float* __restrict__ cov_world,
     const float* __restrict__ transmittance,
     const float* __restrict__ sh_coeffs,
+    const float* __restrict__ sh_basis,
     float radar_x, float radar_y, float radar_z,
     float alpha, float beta, float Rc,
     float rho_r, float rho_a,
@@ -318,12 +404,8 @@ __global__ void preprocess_kernel(
                   c_coord >= 0 && c_coord < (float)Na);
     valid_mask[idx] = valid;
 
-    float theta = beta;
-    float phi = alpha;
-    if (phi < 0.0f) phi += 2.0f * PI;
-
     const float* sh_coeff_i = &sh_coeffs[idx * SH_COEFFS_SIZE];
-    scattering[idx] = compute_sh_scattering(theta, phi, sh_coeff_i);
+    scattering[idx] = compute_sh_scattering_with_basis(sh_basis, sh_coeff_i);
 }
 
 __global__ void compute_ranges_kernel(
@@ -770,6 +852,7 @@ __global__ void backward_kernel(
     const int* __restrict__ tile_gaussian_list,
     const float* __restrict__ means_world,
     const float* __restrict__ grad_output,
+    const float* __restrict__ sh_basis,
     int tiles_x, int tiles_y,
     int Nr, int Na,
     int n_gaussians,
@@ -846,46 +929,6 @@ __global__ void backward_kernel(
 
         float grad_sigma = dL_d_pixel * d_pixel_d_alpha * gamma_ipp;
         atomicAdd(&grad_transmittance[idx], grad_sigma);
-
-        float cos_theta = __cosf(beta);
-        float sin_theta = __sinf(beta);
-        float cos_phi = __cosf(alpha);
-        float sin_phi = __sinf(alpha);
-        if (alpha < 0.0f) {
-            cos_phi = __cosf(alpha + 2.0f * PI);
-            sin_phi = __sinf(alpha + 2.0f * PI);
-        }
-
-        float sin_theta_sq = sin_theta * sin_theta;
-        float cos_theta_sq = cos_theta * cos_theta;
-        float sin_cos_theta = sin_theta * cos_theta;
-        float sin_cos_phi = sin_theta * cos_phi;
-
-        float sh_basis[16];
-        sh_basis[0] = SH_C0;
-        sh_basis[1] = SH_C1 * sin_theta * sin_phi;
-        sh_basis[2] = SH_C1 * sin_theta * cos_phi;
-        sh_basis[3] = SH_C1 * cos_theta;
-
-        sh_basis[4] = SH_C2 * sin_cos_phi * sin_phi;
-        sh_basis[5] = SH_C2 * sin_cos_theta * cos_phi;
-        sh_basis[6] = SH_C20 * (3.0f * cos_theta_sq - 1.0f);
-        sh_basis[7] = -SH_C2 * sin_cos_theta * sin_phi;
-        sh_basis[8] = -SH_C2 * sin_cos_theta * cos_phi;
-
-        float three_cos_theta_sq_minus_one = 3.0f * cos_theta_sq - 1.0f;
-        float five_cos_theta_cu_minus_three = (5.0f * cos_theta_sq - 3.0f) * cos_theta;
-
-        sh_basis[9] = SH_C22 * sin_theta * sin_phi * three_cos_theta_sq_minus_one;
-        sh_basis[10] = SH_C22 * sin_cos_phi * three_cos_theta_sq_minus_one;
-        sh_basis[11] = SH_C22 * cos_theta * three_cos_theta_sq_minus_one;
-        sh_basis[12] = SH_C3 * sin_theta * sin_phi * five_cos_theta_cu_minus_three;
-        sh_basis[13] = SH_C3 * sin_cos_phi * five_cos_theta_cu_minus_three;
-
-        float fifteen_cos_theta_sq_sq_minus_six_cos_theta_sq_minus_one =
-            (15.0f * cos_theta_sq - 6.0f) * cos_theta_sq - 1.0f;
-        sh_basis[14] = SH_C30 * fifteen_cos_theta_sq_sq_minus_six_cos_theta_sq_minus_one;
-        sh_basis[15] = -SH_C3 * sin_theta * sin_phi * five_cos_theta_cu_minus_three;
 
         for (int sh_idx = 0; sh_idx < SH_COEFFS_SIZE; sh_idx++) {
             float grad_sh = dL_d_pixel * d_pixel_d_S * sh_basis[sh_idx];
@@ -1014,11 +1057,13 @@ public:
         float* d_omega_sum;
         int* d_omega_count;
         float* d_omega;
+        float* d_sh_basis;
 
         cudaMalloc(&d_means_world, n * 3 * sizeof(float));
         cudaMalloc(&d_cov_world, n * 6 * sizeof(float));
         cudaMalloc(&d_transmittance, n * sizeof(float));
         cudaMalloc(&d_sh_coeffs, n * SH_COEFFS_SIZE * sizeof(float));
+        cudaMalloc(&d_sh_basis, SH_COEFFS_SIZE * sizeof(float));
         cudaMalloc(&d_ipp_r, n * sizeof(float));
         cudaMalloc(&d_ipp_c, n * sizeof(float));
         cudaMalloc(&d_cov_ipp_rr, n * sizeof(float));
@@ -1065,6 +1110,13 @@ public:
 
         float Rc = radar_altitude / cosf(beta_rad);
 
+        float theta = beta_rad;
+        float phi = track_angle_rad;
+        if (phi < 0.0f) phi += 2.0f * PI;
+        float h_sh_basis[SH_COEFFS_SIZE];
+        compute_sh_basis_host(theta, phi, h_sh_basis);
+        cudaMemcpy(d_sh_basis, h_sh_basis, SH_COEFFS_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
         int block_dim = 256;
         int grid_dim_preprocess = (n + block_dim - 1) / block_dim;
 
@@ -1073,6 +1125,7 @@ public:
             d_cov_world,
             d_transmittance,
             d_sh_coeffs,
+            d_sh_basis,
             radar_pos_x, radar_pos_y, radar_pos_z,
             track_angle_rad, beta_rad, Rc,
             input.range_resolution, input.azimuth_resolution,
@@ -1256,6 +1309,7 @@ public:
         cudaFree(d_omega_sum);
         cudaFree(d_omega_count);
         cudaFree(d_omega);
+        cudaFree(d_sh_basis);
         cudaFree(d_output);
     }
 
@@ -1282,6 +1336,7 @@ public:
         float* d_grad_cov_world,
         float* d_grad_sh_coeffs,
         float* d_grad_transmittance,
+        const float* d_sh_basis,
         float radar_x, float radar_y, float radar_z,
         float alpha, float beta, float Rc,
         float rho_r, float rho_a
@@ -1305,6 +1360,7 @@ public:
             d_tile_gaussian_list,
             d_means_world,
             d_grad_output,
+            d_sh_basis,
             tiles_x, tiles_y,
             Nr, Na,
             n,
@@ -1425,11 +1481,20 @@ std::vector<torch::Tensor> render_sar_backward(
 
     float Rc = radar_altitude / cosf(beta_rad);
 
+    float* d_sh_basis;
+    cudaMalloc(&d_sh_basis, SH_COEFFS_SIZE * sizeof(float));
+    float theta = beta_rad;
+    float phi = track_angle_rad;
+    if (phi < 0.0f) phi += 2.0f * PI;
+    float h_sh_basis[SH_COEFFS_SIZE];
+    compute_sh_basis_host(theta, phi, h_sh_basis);
+    cudaMemcpy(d_sh_basis, h_sh_basis, SH_COEFFS_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
     int block_dim = 256;
     int grid_dim_preprocess = (n + block_dim - 1) / block_dim;
 
     preprocess_kernel<<<grid_dim_preprocess, block_dim>>>(
-        d_means_world, d_cov_world, d_transmittance, d_sh_coeffs,
+        d_means_world, d_cov_world, d_transmittance, d_sh_coeffs, d_sh_basis,
         radar_pos_x, radar_pos_y, radar_pos_z,
         track_angle_rad, beta_rad, Rc,
         range_resolution, azimuth_resolution,
@@ -1507,6 +1572,7 @@ std::vector<torch::Tensor> render_sar_backward(
         grad_cov.data_ptr<float>(),
         grad_sh.data_ptr<float>(),
         grad_transmittance.data_ptr<float>(),
+        d_sh_basis,
         radar_pos_x, radar_pos_y, radar_pos_z,
         track_angle_rad, beta_rad, Rc,
         range_resolution, azimuth_resolution
@@ -1516,6 +1582,7 @@ std::vector<torch::Tensor> render_sar_backward(
     cudaFree(d_cov_world);
     cudaFree(d_transmittance);
     cudaFree(d_sh_coeffs);
+    cudaFree(d_sh_basis);
     cudaFree(d_grad_output);
     cudaFree(d_ipp_r);
     cudaFree(d_ipp_c);
