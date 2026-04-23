@@ -83,7 +83,7 @@ class SARGSTrainingGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("SAR-GS 训练界面")
-        self.root.geometry("1100x800")
+        self.root.geometry("1220x900")
 
         self.training_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
@@ -167,7 +167,7 @@ class SARGSTrainingGUI:
         row += 1
 
         ttk.Label(path_frame, text="数据路径:").grid(row=0, column=0, sticky='w', pady=2)
-        self.data_path_var = tk.StringVar(value='C:/Users/LIU/Desktop/gs_render/sar_gs_v2-temp/data/MSTAR/17PNG_TRAIN/T-72 - 副本')
+        self.data_path_var = tk.StringVar(value='C:/Users/LIU/Desktop/gs_render/sar_gs_v2-temp/data/MSTAR/17PNG_TRAIN/T-621')
         ttk.Entry(path_frame, textvariable=self.data_path_var, width=50).grid(row=0, column=1, padx=5)
         ttk.Button(path_frame, text="浏览...", command=lambda: self.browse_folder(self.data_path_var)).grid(row=0, column=2)
 
@@ -181,8 +181,8 @@ class SARGSTrainingGUI:
         row += 1
 
         self.init_num_gaussians_var = tk.IntVar(value=50000)
-        self.init_scale_var = tk.DoubleVar(value=0.3)
-        self.init_opacity_var = tk.DoubleVar(value=0.3)
+        self.init_scale_var = tk.DoubleVar(value=0.4)
+        self.init_opacity_var = tk.DoubleVar(value=0.5)
 
         self.init_num_gaussians_entry = ttk.Entry(init_frame, textvariable=self.init_num_gaussians_var, width=15)
         self.init_num_gaussians_entry.grid(row=0, column=1, sticky='w', padx=5)
@@ -203,11 +203,11 @@ class SARGSTrainingGUI:
         self.sh_degree_var = tk.IntVar(value=3)
         ttk.Entry(init_frame, textvariable=self.sh_degree_var, width=15).grid(row=1, column=3, sticky='w', padx=5)
 
-        self.add_ground_plane_var = tk.BooleanVar(value=True)
+        self.add_ground_plane_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(init_frame, text="添加地面高斯", variable=self.add_ground_plane_var).grid(row=2, column=0, sticky='w', pady=5, columnspan=2)
 
         ttk.Label(init_frame, text="高斯标准差:").grid(row=3, column=0, sticky='w', pady=2)
-        self.gaussian_std_var = tk.DoubleVar(value=5.0)
+        self.gaussian_std_var = tk.DoubleVar(value=3.0)
         gaussian_std_entry = ttk.Entry(init_frame, textvariable=self.gaussian_std_var, width=15)
         gaussian_std_entry.grid(row=3, column=1, sticky='w', padx=5)
         ToolTip(gaussian_std_entry, "高斯分布标准差，越小越集中在原点附近")
@@ -241,18 +241,18 @@ class SARGSTrainingGUI:
         ttk.Entry(train_frame, textvariable=self.lr_sh_var, width=15).grid(row=3, column=1, sticky='w', padx=5)
 
         ttk.Label(train_frame, text="保存间隔:").grid(row=3, column=2, sticky='w', pady=2, padx=(20, 0))
-        self.save_interval_var = tk.IntVar(value=300)
+        self.save_interval_var = tk.IntVar(value=20)
         ttk.Entry(train_frame, textvariable=self.save_interval_var, width=15).grid(row=3, column=3, sticky='w', padx=5)
 
         self.use_weighted_l1_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(train_frame, text="使用加权L1", variable=self.use_weighted_l1_var).grid(row=4, column=0, sticky='w', pady=2)
 
         ttk.Label(train_frame, text="L1权重:").grid(row=4, column=1, sticky='w', pady=2, padx=(20, 0))
-        self.l1_weight_var = tk.DoubleVar(value=90.0)
+        self.l1_weight_var = tk.DoubleVar(value=1.0)
         ttk.Entry(train_frame, textvariable=self.l1_weight_var, width=10).grid(row=4, column=2, sticky='w', padx=5)
 
         ttk.Label(train_frame, text="SSIM权重:").grid(row=4, column=3, sticky='w', pady=2, padx=(20, 0))
-        self.ssim_weight_var = tk.DoubleVar(value=5.0)
+        self.ssim_weight_var = tk.DoubleVar(value=0.5)
         ttk.Entry(train_frame, textvariable=self.ssim_weight_var, width=10).grid(row=4, column=4, sticky='w', padx=5)
 
         ttk.Label(train_frame, text="加权模式:").grid(row=5, column=0, sticky='w', pady=2)
@@ -285,7 +285,7 @@ class SARGSTrainingGUI:
         ttk.Entry(densify_frame, textvariable=self.clone_threshold_var, width=15).grid(row=2, column=3, sticky='w', padx=5)
 
         ttk.Label(densify_frame, text="分裂阈值(大尺度):").grid(row=3, column=0, sticky='w', pady=2)
-        self.split_threshold_var = tk.DoubleVar(value=1.5)
+        self.split_threshold_var = tk.DoubleVar(value=0.6)
         ttk.Entry(densify_frame, textvariable=self.split_threshold_var, width=15).grid(row=3, column=1, sticky='w', padx=5)
 
         prune_frame = ttk.LabelFrame(scroll_frame, text='剪枝参数', padding="10")
@@ -296,11 +296,11 @@ class SARGSTrainingGUI:
         ttk.Checkbutton(prune_frame, text="启用剪枝", variable=self.prune_enabled_var).grid(row=0, column=0, sticky='w', columnspan=2)
 
         ttk.Label(prune_frame, text="剪枝间隔:").grid(row=1, column=0, sticky='w', pady=2)
-        self.prune_interval_var = tk.IntVar(value=50)
+        self.prune_interval_var = tk.IntVar(value=100)
         ttk.Entry(prune_frame, textvariable=self.prune_interval_var, width=15).grid(row=1, column=1, sticky='w', padx=5)
 
         ttk.Label(prune_frame, text="起始迭代:").grid(row=1, column=2, sticky='w', pady=2, padx=(20, 0))
-        self.prune_start_iter_var = tk.IntVar(value=300)
+        self.prune_start_iter_var = tk.IntVar(value=200)
         ttk.Entry(prune_frame, textvariable=self.prune_start_iter_var, width=15).grid(row=1, column=3, sticky='w', padx=5)
 
         ttk.Label(prune_frame, text="不透明度阈值:").grid(row=2, column=0, sticky='w', pady=2)
@@ -312,7 +312,7 @@ class SARGSTrainingGUI:
         ttk.Entry(prune_frame, textvariable=self.opacity_reset_interval_var, width=15).grid(row=2, column=3, sticky='w', padx=5)
 
         ttk.Label(prune_frame, text="尺寸阈值:").grid(row=3, column=0, sticky='w', pady=2)
-        self.size_threshold_var = tk.DoubleVar(value=2.0)
+        self.size_threshold_var = tk.DoubleVar(value=0.8)
         size_threshold_entry = ttk.Entry(prune_frame, textvariable=self.size_threshold_var, width=15)
         size_threshold_entry.grid(row=3, column=1, sticky='w', padx=5)
         ToolTip(size_threshold_entry, "超过此尺寸的高斯将被剪枝")
@@ -371,7 +371,7 @@ class SARGSTrainingGUI:
         sphere_scale_frame = ttk.Frame(filter_frame)
         sphere_scale_frame.pack(fill=tk.X, pady=2)
         ttk.Label(sphere_scale_frame, text="球体/椭球缩放:").pack(side=tk.LEFT)
-        self.viz_sphere_scale_var = tk.DoubleVar(value=1.0)
+        self.viz_sphere_scale_var = tk.DoubleVar(value=1.5)
         sphere_scale_entry = ttk.Entry(sphere_scale_frame, textvariable=self.viz_sphere_scale_var, width=8)
         sphere_scale_entry.pack(side=tk.LEFT, padx=5)
         ToolTip(sphere_scale_entry, "球体或椭球的显示缩放倍数")
@@ -553,7 +553,7 @@ class SARGSTrainingGUI:
                 sample_means[:, 1],
                 sample_means[:, 2],
                 c=sample_z,
-                cmap='jet',
+                cmap='viridis',
                 s=2,
                 alpha=0.8,
                 norm=norm
@@ -865,8 +865,7 @@ class SARGSTrainingGUI:
 
         if resume_from_checkpoint and hasattr(self, 'checkpoint_path'):
             if checkpoint_info.get('optimizer_state') is not None:
-                optimizer.load_state_dict(checkpoint_info['optimizer_state'])
-                self.log("优化器状态已恢复")
+                self.log("跳过优化器状态恢复（避免参数ID不匹配）")
 
         scheduler = optim.lr_scheduler.StepLR(
             optimizer,
@@ -942,18 +941,19 @@ class SARGSTrainingGUI:
 
             if epoch % (save_interval // len(dataset) + 1) == 0 and pipeline.iteration > 0:
                 checkpoint_path = output_dir / f'checkpoint_iter_{pipeline.iteration}.pth'
-                gaussian_model.save_checkpoint(str(checkpoint_path), iteration=pipeline.iteration, optimizer_state=optimizer.state_dict())
+                gaussian_model.save_checkpoint(str(checkpoint_path), iteration=pipeline.iteration, optimizer_state=None)
                 self.log(f"已保存检查点: {checkpoint_path}")
 
         final_path = output_dir / 'final_model.pth'
-        gaussian_model.save_checkpoint(str(final_path), iteration=pipeline.iteration, optimizer_state=optimizer.state_dict())
+        gaussian_model.save_checkpoint(str(final_path), iteration=pipeline.iteration, optimizer_state=None)
         self.log(f"训练完成! 模型已保存: {final_path}")
 
     def _update_sh_degree_pipeline(self, pipeline, epoch):
         """更新SH degree"""
-        epoch_based_degree = epoch // 5
-        iteration_based_degree = pipeline.iteration // 200
-        new_degree = min(max(epoch_based_degree, iteration_based_degree), self.sh_degree_var.get())
+        max_sh_degree = min(self.sh_degree_var.get(), 3)
+        epoch_based_degree = min(epoch // 5, max_sh_degree)
+        iteration_based_degree = min(pipeline.iteration // 200, max_sh_degree)
+        new_degree = min(max(epoch_based_degree, iteration_based_degree), max_sh_degree)
 
         if new_degree != pipeline.get_sh_degree():
             pipeline.set_sh_degree(new_degree)

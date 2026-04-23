@@ -4,7 +4,7 @@
 1. [项目概述](#1-项目概述)
 2. [数学原理](#2-数学原理)
 3. [模块架构](#3-模块架构)
-4. [CPU与GPU版本对比](#4-cpu与gpu版本对比)
+4. [渲染器架构](#4-渲染器架构)
 5. [核心公式对照表](#5-核心公式对照表)
 6. [使用示例](#6-使用示例)
 
@@ -23,22 +23,26 @@
 
 ### 1.3 项目结构
 ```
-sar_gs/
+sar_gs_v2-temp/
 ├── __init__.py                     # 模块导出
-├── gaussian_model.py               # 3D高斯模型定义（CPU/GPU共用）
-├── losses.py                       # 损失函数（CPU/GPU共用）
-├── trainer.py                      # 训练器（CPU/GPU共用）
-├── CPU_render_demo.py              # CPU版本渲染演示
-├── Compare_CPU_GPU_speed.py        # CPU/GPU性能对比脚本
-├── renderer/
+├── gaussian_model.py               # 3D高斯模型定义
+├── losses.py                       # 损失函数
+├── train.py                       # 命令行训练脚本
+├── train_gui.py                   # GUI训练界面
+├── training_strategies.py         # 致密化/剪枝配置
+├── scene/
 │   ├── __init__.py
-│   ├── sar_renderer.py              # CPU渲染器实现
-│   └── spherical_harmonics.py      # 球谐函数
+│   └── dataset_readers.py         # MSTAR数据加载
+├── training/
+│   ├── __init__.py
+│   ├── training_pipeline.py       # 训练管线
+│   ├── render_pipeline.py         # 渲染管线（含缓存）
+│   └── densify_prune.py          # 致密化/剪枝管理
 └── cuda_rasterizer/
-    ├── __init__.py                 # CUDA Python绑定
-    ├── build_v2_setup.py           # CUDA编译脚本
-    ├── rasterizer_impl_v2.cu       # CUDA渲染核实现
-    └── cuda_rasterizer_sar.cp39-win_amd64.pyd  # 编译后的CUDA模块
+    ├── __init__.py               # CUDA Python绑定
+    ├── build_v2_setup.py          # CUDA编译脚本
+    ├── rasterizer_autograd.py     # PyTorch autograd封装
+    └── rasterizer_impl_v2.cu      # CUDA渲染核实现
 ```
 
 ---
@@ -129,32 +133,23 @@ R = Quaternion.to_rotation_matrix(self._rotations)
 cov = R @ S @ S_T @ R.transpose(-1, -2)
 ```
 
-### 3.2 球谐函数 (renderer/spherical_harmonics.py)
+### 3.2 球谐函数 (CUDA实现)
 
-**功能**: 球谐函数展开计算散射强度（CPU版本）
+**功能**: GPU内部实时计算球谐散射强度
 
 **散射模型**:
 ```
 I(θ, φ) = Σ(l=0→3) Σ(m=-l→l) c_lm · Y_lm(θ, φ)
 ```
 
-### 3.3 SAR渲染器 (renderer/sar_renderer.py)
+**Leaky ReLU激活**: 为保证梯度流畅性，负散射值通过Leaky ReLU压缩（α=0.1）
 
-**功能**: CPU版本完整SAR渲染管线
-
-**核心类**:
-- `SARRenderParams`: SAR渲染参数
-- `CoordinateTransformer`: 坐标系变换
-- `UnifiedProjector`: 统一投影器
-- `GaussianDensityCalculator`: 高斯密度计算
-- `UnifiedSARRenderer`: 统一SAR渲染器
-- `SARRenderer`: 顶层渲染接口
-
-### 3.4 CUDA渲染器 (cuda_rasterizer/)
+### 3.3 CUDA渲染器 (cuda_rasterizer/)
 
 **功能**: GPU版本加速SAR渲染
 
 **核心组件**:
+- `rasterizer_autograd.py`: PyTorch autograd封装
 - `rasterizer_impl_v2.cu`: CUDA kernel实现
   - `build_tile_gaussian_list_kernel`: 构建tile高斯列表
   - `render_kernel`: 渲染kernel
@@ -163,36 +158,16 @@ I(θ, φ) = Σ(l=0→3) Σ(m=-l→l) c_lm · Y_lm(θ, φ)
 
 ---
 
-## 4. CPU与GPU版本对比
+## 4. 渲染器架构
 
-### 4.1 架构对比
+### 4.1 渲染流程
 
-| 特性 | CPU版本 | GPU版本 |
-|------|---------|---------|
-| 渲染实现 | `renderer/sar_renderer.py` | `cuda_rasterizer/rasterizer_impl_v2.cu` |
-| 球谐计算 | `spherical_harmonics.py` (Python预计算) | CUDA内部实时计算 |
-| 并行方式 | 串行遍历像素/高斯 | CUDA并行tile处理 |
-| 调用方式 | `SARRenderer` 类 | `cuda_rasterizer_sar.render_sar()` |
-
-### 4.2 工作流程对比
-
-#### CPU版本流程
 ```
 GaussianModel (Python)
     ↓ 生成高斯参数
-SARRenderer.render() 
-    ↓ 1. 坐标变换 (Python循环)
-    ↓ 2. 球谐预计算 (Python)
-    ↓ 3. 逐像素遍历高斯累加
-    ↓ 4. 阴影渲染
-    → 输出SAR图像
-```
-
-#### GPU版本流程
-```
-GaussianModel (Python)
-    ↓ 生成高斯参数
-cuda_rasterizer_sar.render_sar()
+RenderPipeline.render()
+    ↓ 渲染器缓存管理
+SARRasterizer.forward() (CUDA)
     ↓ 1. 数据传输到GPU
     ↓ 2. build_tile_gaussian_list_kernel (GPU)
     ↓    - 坐标变换、球谐计算、密度计算
@@ -201,26 +176,33 @@ cuda_rasterizer_sar.render_sar()
     → 输出SAR图像
 ```
 
+### 4.2 SH阶数自适应
+
+渲染器自动检测SH阶数变化，清空缓存确保正确渲染：
+- 初始阶数由GUI设置
+- 训练过程中根据迭代次数/Epoch自动调整
+- 阶数变化时自动清空渲染器缓存
+
 ### 4.3 核心渲染公式
 
-两种版本共享相同的渲染物理模型：
+渲染物理模型：
 
 ```
 I(n_a, n_r) = Σ_i [ S_i(β, α) × σ_i × γ_i,ipp(n_a, n_r) × Ω_i,s(n_a, n_r) ]
 ```
 
 其中:
-- S_i(β, α): 球谐散射强度
+- S_i(β, α): 球谐散射强度（Leaky ReLU激活）
 - σ_i: 透射率（不透明度）
 - γ_i,ipp: IPP投影密度值
 - Ω_i,s: 遮挡因子 = Π(j: Z_j < Z_i) [1 - γ_j,s × σ_j]
 
-### 4.4 性能对比
+### 4.4 渲染缓存机制
 
-使用 `Compare_CPU_GPU_speed.py` 脚本进行基准测试，可获得：
-- 各雷达参数配置下的渲染时间
-- GPU加速比
-- 输出图像质量对比
+为提升训练效率，渲染器实现缓存机制：
+- 按雷达视角参数（入射角、方位角）缓存渲染器
+- SH阶数变化时自动清空缓存
+- 支持渲染器数量上限控制
 
 ---
 
@@ -230,70 +212,37 @@ I(n_a, n_r) = Σ_i [ S_i(β, α) × σ_i × γ_i,ipp(n_a, n_r) × Ω_i,s(n_a, n_
 
 | 公式 | 代码位置 |
 |------|----------|
-| sin(β) = sin(θ) · cos(φ) | `SARRenderParams.beta` |
-| R_c = H / cos(β) | `SARRenderParams.Rc` |
-| P_radar,w = (H·tan(β)·sin(α), -H·tan(β)·cos(α), H) | `SARRenderParams.get_radar_position()` |
+| sin(β) = sin(θ) · cos(φ) | `scene.dataset_readers.py` |
+| R_c = H / cos(β) | `scene.dataset_readers.py` |
+| P_radar,w = (H·tan(β)·sin(α), -H·tan(β)·cos(α), H) | `scene.dataset_readers.py` |
 
 ### 5.2 坐标变换
 
 | 公式 | 代码位置 |
 |------|----------|
-| R_w→r 矩阵 | `CoordinateTransformer._compute_rotation_matrix()` |
-| P_r = R_w→r · (P_w - P_radar,w) | `CoordinateTransformer.world_to_radar()` |
-| Σ_r = R_w→r · Σ_w · R_w→r^T | `CoordinateTransformer.transform_covariance()` |
+| R_w→r 矩阵 | `CUDA rasterizer_impl_v2.cu` |
+| P_r = R_w→r · (P_w - P_radar,w) | `CUDA rasterizer_impl_v2.cu` |
+| Σ_r = R_w→r · Σ_w · R_w→r^T | `CUDA rasterizer_impl_v2.cu` |
 
 ### 5.3 投影映射
 
 | 公式 | 代码位置 |
 |------|----------|
-| R_min = √(Y_r² + Z_r²) | `UnifiedProjector.project_to_image_plane()` |
-| r = R_min/ρ_r + N_r/2 - R_c/ρ_r | `UnifiedProjector.project_to_image_plane()` |
-| c = X_r/ρ_a + N_a/2 | `UnifiedProjector.project_to_image_plane()` |
-| 雅可比矩阵 J | `UnifiedProjector._compute_jacobian()` |
+| R_min = √(Y_r² + Z_r²) | `CUDA rasterizer_impl_v2.cu` |
+| r = R_min/ρ_r + N_r/2 - R_c/ρ_r | `CUDA rasterizer_impl_v2.cu` |
+| c = X_r/ρ_a + N_a/2 | `CUDA rasterizer_impl_v2.cu` |
 
 ### 5.4 渲染公式
 
 | 公式 | 代码位置 |
 |------|----------|
-| I_intensity = Σ s_i · α_i · γ_i | `UnifiedSARRenderer._render_intensity()` |
-| I_shadow = Σ occlusion_i · α_i · γ_i | `UnifiedSARRenderer._render_shadow()` |
-| I_render = I_intensity ⊙ I_shadow | `SARRenderer.forward()` |
+| I = Σ T_i × α_i × S_i | `CUDA rasterizer_impl_v2.cu` |
 
 ---
 
 ## 6. 使用示例
 
-### 6.1 CPU版本渲染
-```python
-from sar_gs import GaussianModel, SARRenderer, SARRenderParams
-import torch
-
-params = SARRenderParams(
-    incidence_angle=30.0,
-    azimuth_angle=0.0,
-    radar_altitude=5000.0,
-    azimuth_resolution=1.0,
-    range_resolution=1.0,
-    azimuth_samples=256,
-    range_samples=256
-)
-
-renderer = SARRenderer(params)
-
-# 准备高斯数据
-means = torch.randn(1000, 3) * 100
-cov = torch.eye(3).unsqueeze(0).expand(1000, -1, -1) * 10
-sh_coeffs = torch.randn(1000, 16) * 0.1
-opacity = torch.sigmoid(torch.randn(1000))
-
-# 渲染
-with torch.no_grad():
-    rendered, _ = renderer(means, cov, sh_coeffs, radar_position=None,
-                          transmittance=opacity, track_angle=0.0,
-                          compute_shadow=True)
-```
-
-### 6.2 GPU版本渲染
+### 6.1 GPU渲染
 ```python
 from sar_gs.cuda_rasterizer import cuda_rasterizer_sar
 import torch
@@ -314,49 +263,28 @@ output = cuda_rasterizer_sar.render_sar(
 )
 ```
 
-### 6.3 性能对比
-```bash
-python Compare_CPU_GPU_speed.py
-```
-
-输出示例：
-```
-======================================================================
-CUDA vs CPU 渲染性能对比基准测试
-======================================================================
-配置 入射角=42.0°, 斜视角=0.0°, 偏航角=0.0°
-  [CUDA渲染] 耗时: 15.23ms
-  [CPU渲染]  耗时: 1234.56ms
-  加速比: 81.05x
-```
-
-### 6.4 训练流程
+### 6.2 训练流程
 ```python
-from sar_gs import GaussianModel, SARTrainer, SARTrainingPipeline, TrainingConfig
-from sar_gs.losses import L1Loss, SSIMLoss
+from sar_gs import GaussianModel
+from sar_gs.training import TrainingPipeline
+from sar_gs.losses import CombinedLoss
 
 model = GaussianModel(sh_degree=3)
-config = TrainingConfig(
-    iterations=30000,
-    learning_rate_position=1.6e-5,
-    learning_rate_opacity=0.05,
-    lambda_dssim=0.2
-)
+loss_fn = CombinedLoss()
+pipeline = TrainingPipeline(model, loss_fn)
 
-loss_fn = L1Loss() + 0.2 * SSIMLoss()
-trainer = SARTrainer(model, config, loss_fn)
-
-# 开始训练
-trainer.train(dataloader)
+# 训练
+for camera in dataloader:
+    result = pipeline.train_step(camera)
 ```
 
 ---
 
-## 7. 3DGS训练管线（新）
+## 7. 3DGS训练管线
 
 ### 7.1 项目结构（训练相关）
 ```
-sar_gs/
+sar_gs_v2-temp/
 ├── __init__.py                     # 模块导出
 ├── gaussian_model.py               # 3D高斯模型
 ├── losses.py                      # L1 + D-SSIM损失函数
@@ -366,6 +294,11 @@ sar_gs/
 ├── scene/
 │   ├── __init__.py
 │   └── dataset_readers.py         # MSTAR数据加载
+├── training/
+│   ├── __init__.py
+│   ├── training_pipeline.py       # 训练管线
+│   ├── render_pipeline.py         # 渲染管线（含缓存）
+│   └── densify_prune.py          # 致密化/剪枝管理
 └── cuda_rasterizer/               # CUDA渲染器
 ```
 

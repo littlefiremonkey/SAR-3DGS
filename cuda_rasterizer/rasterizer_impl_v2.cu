@@ -67,7 +67,8 @@ __device__ float compute_sh_scattering(float theta, float phi, const float* sh_c
     for (int i = 1; i < SH_COEFFS_SIZE; i++) {
         scattering = fmaf(sh_coeffs[i], sh_basis[i], scattering);
     }
-    return scattering;
+    const float LEAKY_ALPHA = 0.1f;
+    return scattering > 0.0f ? scattering : LEAKY_ALPHA * scattering;
 }
 
 __device__ void compute_view_direction(float beta, float alpha, float& vx, float& vy, float& vz) {
@@ -238,7 +239,8 @@ __device__ float compute_sh_scattering_with_basis(const float* sh_basis, const f
     for (int i = 1; i < SH_COEFFS_SIZE; i++) {
         scattering = fmaf(sh_coeffs[i], sh_basis[i], scattering);
     }
-    return scattering;
+    const float LEAKY_ALPHA = 0.1f;
+    return scattering > 0.0f ? scattering : LEAKY_ALPHA * scattering;
 }
 
 __device__ void compute_sh_basis_device(float theta, float phi, float* sh_basis) {

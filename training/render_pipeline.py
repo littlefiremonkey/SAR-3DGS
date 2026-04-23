@@ -61,12 +61,14 @@ class RenderPipeline:
         """
         renderer = self._get_or_create_renderer(camera)
         cov_full = model.compute_covariance_full()
+        active_sh_coeffs = model.get_active_sh_coeffs()
+        sh_degree = model.active_sh_degree
 
         rendered = renderer(
             model._means,
             cov_full,
             model.get_opacity().squeeze(-1),
-            model.get_active_sh_coeffs()
+            active_sh_coeffs
         )
 
         if rendered.shape != camera.image.shape:
@@ -77,6 +79,7 @@ class RenderPipeline:
                 align_corners=False
             ).squeeze()
 
+        self._last_sh_degree = sh_degree
         return rendered
 
     def _get_or_create_renderer(self, camera: SARCameraInfo):
@@ -94,6 +97,20 @@ class RenderPipeline:
             self._renderers[key] = self._create_renderer(camera)
 
         return self._renderers[key]
+
+    def _check_sh_degree_changed(self, new_degree: int) -> bool:
+        """检查SH阶数是否变化，若是则清空渲染器缓存
+
+        Args:
+            new_degree: 新的SH阶数
+
+        Returns:
+            bool: 是否清空了缓存
+        """
+        if hasattr(self, '_last_sh_degree') and self._last_sh_degree != new_degree:
+            self._renderers.clear()
+            return True
+        return False
 
     def _create_renderer(self, camera: SARCameraInfo):
         """创建新的渲染器

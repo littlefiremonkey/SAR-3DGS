@@ -154,6 +154,8 @@ class TrainingPipeline:
         Returns:
             TrainStepResult: 训练结果
         """
+        self.render_pipeline._check_sh_degree_changed(self.model.active_sh_degree)
+
         norm_factor = camera.normalization_factor
         target_image = camera.image.to(next(self.model.parameters()).device) / norm_factor
 
@@ -191,6 +193,9 @@ class TrainingPipeline:
                 self._epoch_clone_count += densify_prune_result.num_clones
                 self._epoch_split_count += densify_prune_result.num_splits
                 self._epoch_prune_count += densify_prune_result.num_prunes
+
+                self.optimizer.param_groups[0]['params'] = list(self.model.parameters())
+                self.optimizer.state.clear()
 
                 torch.cuda.empty_cache()
 

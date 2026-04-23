@@ -79,7 +79,7 @@ def gaussian_kernel(size: int, sigma: float = 1.5) -> torch.Tensor:
     return kernel
 
 
-def dssim_loss(pred: torch.Tensor, target: torch.Tensor, window_size: int = 7) -> torch.Tensor:
+def dssim_loss(pred: torch.Tensor, target: torch.Tensor, window_size: int = 5) -> torch.Tensor:
     """D-SSIM损失 (结构相似性差异)
 
     Args:
@@ -139,7 +139,7 @@ class CombinedLoss(nn.Module):
         self,
         l1_weight: float = 0.9,
         ssim_weight: float = 0.1,
-        window_size: int = 7,
+        window_size: int = 5,
         use_weighted_l1: bool = False,
         l1_weight_mode: str = 'linear'
     ):
